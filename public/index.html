@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 PPS Sparky — Multiplayer Pong</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:24px 14px;background:#080d18;color:#f1f5f9;font-family:Arial,sans-serif}
+.container{max-width:950px;margin:auto}header{text-align:center;margin-bottom:22px}h1{font-size:clamp(28px,5vw,44px);margin:0}h1 span{color:#38bdf8}header p{color:#94a3b8}
+.panel,.card{background:#111a2b;border:1px solid #273449;border-radius:14px;padding:16px;margin-bottom:16px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center}input{background:#080d18;border:1px solid #334155;border-radius:8px;padding:12px;color:white;min-width:120px;max-width:100%}
+button{border:0;border-radius:9px;padding:12px 16px;color:white;font-weight:bold;cursor:pointer;background:#334155}button:disabled{opacity:.4;cursor:not-allowed}.green{background:#059669}.orange{background:#d97706}.red{background:#dc2626}.blue{background:#0284c7}
+#roomInfo{color:#94a3b8;text-align:center;line-height:1.8;margin-top:12px;overflow-wrap:anywhere}.scores{display:grid;grid-template-columns:1fr 1fr;gap:12px}.scorecard{text-align:center;background:#111a2b;border:1px solid #273449;border-radius:14px;padding:14px}.scorecard h2{font-size:14px;color:#94a3b8;margin:0}.score{font-size:38px;font-weight:bold;margin-top:4px}.p1{color:#34d399}.p2{color:#38bdf8}
+.gamebox{padding:10px;background:#0b1220;border:1px solid #273449;border-radius:16px;margin-top:16px}canvas{display:block;width:100%;height:auto;aspect-ratio:2/1;background:#050914;border-radius:8px;touch-action:none}.status{text-align:center;padding:12px 0 3px;color:#94a3b8}
+.controls{display:flex;justify-content:center;flex-wrap:wrap;gap:10px;margin:16px 0}.movegrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.movegrid .card{text-align:center}.movegrid h3{font-size:14px}.arrows{display:flex;justify-content:center;gap:12px}.arrow{width:70px;font-size:20px;touch-action:none;user-select:none}.small{font-size:13px;color:#94a3b8;line-height:1.6;text-align:center}
+@media(max-width:560px){.movegrid{grid-template-columns:1fr}.row>*{flex:1}.scores{gap:8px}}
+</style>
+</head>
+<body>
+<div class="container">
+<header><h1><span>PPS Sparky</span></h1><p>Multiplayer Ping Pong — Create a room and invite a friend</p></header>
+
+<section class="panel">
+  <div class="row">
+    <input id="name" maxlength="24" placeholder="Your player name" value="Player">
+    <button id="createBtn" class="green">Create Room</button>
+    <input id="roomInput" maxlength="6" placeholder="Room code">
+    <button id="joinBtn" class="blue">Join Room</button>
+  </div>
+  <div id="roomInfo">Connect to the server, then create a room or join a friend's room.</div>
+  <div class="row" style="margin-top:10px"><button id="copyBtn" disabled>Copy Invite Link</button></div>
+</section>
+
+<section class="scores">
+  <div class="scorecard"><h2 id="p1name">PLAYER 1</h2><div class="score p1" id="score1">0</div></div>
+  <div class="scorecard"><h2 id="p2name">PLAYER 2</h2><div class="score p2" id="score2">0</div></div>
+</section>
+
+<section class="gamebox">
+  <canvas id="game" width="640" height="320"></canvas>
+  <div class="status" id="status">Create or join a room to begin.</div>
+</section>
+
+<div class="controls">
+  <button class="green" id="startBtn" disabled>▶ Start Match (Host)</button>
+  <button class="orange" id="pauseBtn" disabled>Ⅱ Pause</button>
+  <button class="red" id="restartBtn" disabled>↻ Restart</button>
+</div>
+
+<section class="movegrid">
+  <div class="card"><h3>PLAYER 1 — W / S</h3><div class="arrows"><button class="arrow" data-dir="-1">▲</button><button class="arrow" data-dir="1">▼</button></div></div>
+  <div class="card"><h3>PLAYER 2 — ↑ / ↓</h3><div class="arrows"><button class="arrow" data-dir="-1">▲</button><button class="arrow" data-dir="1">▼</button></div></div>
+</section>
+<p class="small">Player 1 uses W/S. Player 2 uses ↑/↓. On mobile, hold your assigned arrow button. The room creator is Player 1; the joining player is Player 2. First to 5 points wins.</p>
+</div>
+<script>
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+const statusEl=document.getElementById("status"),roomInfo=document.getElementById("roomInfo");
+let ws=null,roomId=null,myPlayer=0,state=null,heldDir=0,connected=false;
+const keys={};
+function setStatus(s){statusEl.textContent=s}
+function connect(){
+  const proto=location.protocol==="https:"?"wss:":"ws:";
+  ws=new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen=()=>{connected=true;roomInfo.textContent="Connected to multiplayer server. Create a room or join with a code.";};
+  ws.onclose=()=>{connected=false;roomInfo.textContent="Disconnected from server. Refresh to reconnect.";};
+  ws.onerror=()=>{roomInfo.textContent="Could not connect to the game server.";};
+  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch{return}
+    if(m.type==="error"){roomInfo.textContent=m.message;return}
+    if(m.type==="joined"){roomId=m.roomId;myPlayer=m.player;document.getElementById("roomInput").value=roomId;document.getElementById("copyBtn").disabled=false;updateRoomInfo();if(location.hash!==`#${roomId}`)history.replaceState(null,"",`#${roomId}`);return}
+    if(m.type==="state"){state=m;renderState();updateRoomInfo();}
+  };
+}
+function send(obj){if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(obj))}
+function createRoom(){if(!connected)return alert("Wait until the server connects.");send({type:"create",name:document.getElementById("name").value.trim()||"Player 1"})}
+function joinRoom(code){if(!connected)return alert("Wait until the server connects.");const id=(code||document.getElementById("roomInput").value).trim().toUpperCase();if(!id)return alert("Enter a room code.");send({type:"join",roomId:id,name:document.getElementById("name").value.trim()||"Player 2"})}
+document.getElementById("createBtn").onclick=createRoom;
+document.getElementById("joinBtn").onclick=()=>joinRoom();
+document.getElementById("copyBtn").onclick=async()=>{const url=`${location.origin}/#${roomId}`;try{await navigator.clipboard.writeText(url);roomInfo.textContent="Invite link copied: "+url}catch{prompt("Copy this invite link:",url)}};
+document.getElementById("startBtn").onclick=()=>send({type:"start"});
+document.getElementById("pauseBtn").onclick=()=>send({type:"pause"});
+document.getElementById("restartBtn").onclick=()=>send({type:"restart"});
+function updateRoomInfo(){
+ if(!state)return;
+ const p1=state.players[0],p2=state.players[1];
+ document.getElementById("p1name").textContent=(p1?.name||"PLAYER 1").toUpperCase();
+ document.getElementById("p2name").textContent=(p2?.name||"PLAYER 2").toUpperCase();
+ const link=`${location.origin}/#${state.roomId}`;
+ roomInfo.innerHTML=`Room: <strong>${state.roomId}</strong> · You are <strong>Player ${myPlayer||"—"}</strong><br>${p1?.connected?"Player 1 connected":"Waiting for Player 1"} · ${p2?.connected?"Player 2 connected":"Waiting for Player 2"}<br><span style="font-size:12px">${link}</span>`;
+ document.getElementById("startBtn").disabled=!(myPlayer===1&&p1?.connected&&p2?.connected&&state.status!=="finished");
+ document.getElementById("pauseBtn").disabled=!(myPlayer===1&&state.status==="playing");
+ document.getElementById("restartBtn").disabled=!(myPlayer===1);
+ if(state.status==="waiting")setStatus("Waiting for both players to connect.");
+ else if(state.status==="ready")setStatus("Both players connected. Host can start the match.");
+ else if(state.status==="playing")setStatus("Match in progress");
+ else if(state.status==="paused")setStatus("Match paused by host");
+ else if(state.status==="finished")setStatus(`🏆 Player ${state.winner} wins!`);
+}
+function draw(){
+ ctx.fillStyle="#050914";ctx.fillRect(0,0,640,320);
+ ctx.strokeStyle="#334155";ctx.lineWidth=2;ctx.setLineDash([10,10]);ctx.beginPath();ctx.moveTo(320,0);ctx.lineTo(320,320);ctx.stroke();ctx.setLineDash([]);
+ if(!state){ctx.fillStyle="#94a3b8";ctx.font="18px Arial";ctx.textAlign="center";ctx.fillText("Create or join a room",320,165);return}
+ const g=state.game;
+ ctx.fillStyle="#34d399";ctx.fillRect(g.p1.x,g.p1.y,10,70);
+ ctx.fillStyle="#38bdf8";ctx.fillRect(g.p2.x,g.p2.y,10,70);
+ ctx.fillStyle="#f8fafc";ctx.beginPath();ctx.arc(g.ball.x,g.ball.y,g.ball.r,0,Math.PI*2);ctx.fill();
+}
+function renderState(){document.getElementById("score1").textContent=state.scores[0];document.getElementById("score2").textContent=state.scores[1];draw()}
+function sendInput(dir){heldDir=dir;send({type:"input",dir})}
+window.addEventListener("keydown",e=>{if(["ArrowUp","ArrowDown"," "].includes(e.key))e.preventDefault();keys[e.key]=true;});
+window.addEventListener("keyup",e=>{keys[e.key]=false;});
+setInterval(()=>{
+ let dir=0;
+ if(myPlayer===1){if(keys.w||keys.W)dir=-1;else if(keys.s||keys.S)dir=1;}
+ if(myPlayer===2){if(keys.ArrowUp)dir=-1;else if(keys.ArrowDown)dir=1;}
+ if(dir!==heldDir){heldDir=dir;send({type:"input",dir})}
+},40);
+document.querySelectorAll(".arrow").forEach(btn=>{
+ btn.addEventListener("pointerdown",e=>{e.preventDefault();const dir=Number(btn.dataset.dir);sendInput(dir);});
+ const release=e=>{e.preventDefault();sendInput(0)};
+ btn.addEventListener("pointerup",release);btn.addEventListener("pointercancel",release);btn.addEventListener("lostpointercapture",release);
+});
+connect();
+if(location.hash.length>1){document.getElementById("roomInput").value=location.hash.slice(1).toUpperCase();setTimeout(()=>joinRoom(location.hash.slice(1)),500)}
+draw();
+</script>
+</body>
+</html>
