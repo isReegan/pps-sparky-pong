@@ -28,6 +28,10 @@ function broadcast(room, obj) {
       player.ws.send(msg);
     }
   }
+  // Spectators receive the same game state but cannot control the match.
+  for (const spectator of room.spectators) {
+    if (spectator.readyState === WebSocket.OPEN) spectator.send(msg);
+  }
 }
 function publicState(room) {
   return {
@@ -52,6 +56,7 @@ function createRoom(ws, name) {
   const room = {
     id, status: "waiting", scores: [0, 0], winner: null,
     players: [{ ws, name: name || "Player 1" }, null],
+    spectators: new Set(),
     paddles: [125, 125],
     input: [0, 0],
     ball: { x: 320, y: 160, vx: 210, vy: 115, r: 7 },
@@ -80,6 +85,16 @@ function joinRoom(ws, id, name) {
   ws.playerIndex = 1;
   send(ws, { type: "joined", roomId: room.id, player: 2 });
   emitState(room);
+}
+function spectateRoom(ws, id) {
+  const room = rooms.get(String(id || "").toUpperCase());
+  if (!room) return send(ws, { type: "error", message: "Room not found. Check the room code." });
+  room.spectators.add(ws);
+  ws.roomId = room.id;
+  ws.playerIndex = "spectator";
+  send(ws, { type: "watching", roomId: room.id, role: "spectator" });
+  // Send the current frame immediately instead of waiting for the next tick.
+  send(ws, publicState(room));
 }
 function resetBall(room, direction = 1) {
   room.ball = {
@@ -153,6 +168,10 @@ function disconnect(ws) {
   if (!id) return;
   const room = rooms.get(id);
   if (!room) return;
+  if (ws.playerIndex === "spectator") {
+    room.spectators.delete(ws);
+    return;
+  }
   const idx = ws.playerIndex;
   if (idx === 0 || idx === 1) {
     if (room.players[idx] && room.players[idx].ws === ws) {
@@ -174,6 +193,7 @@ wss.on("connection", (ws) => {
     try { msg = JSON.parse(raw.toString()); } catch { return send(ws, { type: "error", message: "Invalid message." }); }
     if (msg.type === "create") return createRoom(ws, String(msg.name || "Player 1").slice(0, 24));
     if (msg.type === "join") return joinRoom(ws, msg.roomId, String(msg.name || "Player 2").slice(0, 24));
+    if (msg.type === "spectate") return spectateRoom(ws, msg.roomId);
 
     const room = rooms.get(ws.roomId);
     if (!room || (ws.playerIndex !== 0 && ws.playerIndex !== 1)) return;
